@@ -15,7 +15,7 @@ httpx
 groq
 openai
 anthropic
-google-generativeai
+google-genai
 langchain-google-genai
 
 # Question session
@@ -23,3 +23,5 @@ langchain-core
 
 # Env
 python-dotenv
+
+audioop-lts
