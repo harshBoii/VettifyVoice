@@ -23,5 +23,6 @@ langchain-core
 
 # Env
 python-dotenv
+python-multipart
 
 audioop-lts
