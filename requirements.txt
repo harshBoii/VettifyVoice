@@ -1,0 +1,25 @@
+# Server
+fastapi
+uvicorn[standard]
+
+# Twilio
+twilio
+
+# STT — Deepgram (via WebSocket, no SDK needed)
+websockets
+
+# TTS + HTTP
+httpx
+
+# LLM providers (install only what you use)
+groq
+openai
+anthropic
+google-generativeai
+langchain-google-genai
+
+# Question session
+langchain-core
+
+# Env
+python-dotenv
