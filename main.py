@@ -26,6 +26,8 @@ TWILIO_ACCOUNT_SID  = os.environ["TWILIO_ACCOUNT_SID"]
 TWILIO_AUTH_TOKEN   = os.environ["TWILIO_AUTH_TOKEN"]
 TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
 PUBLIC_BASE_URL     = os.environ["PUBLIC_BASE_URL"].rstrip("/")
+WEBHOOK_URL         = os.environ["WEBHOOK_URL"]
+
 
 # ─── STT ──────────────────────────────────────────────────────────────────────
 DEEPGRAM_API_KEY    = os.environ["DEEPGRAM_API_KEY"]
@@ -242,6 +244,8 @@ def build_question_config(body: dict) -> dict:
         "__mode":            "question",
         "context":           body.get("context", {}),
         "callback_url":      body.get("callback_url"),
+        "emp_id":            body.get("emp_id"),
+        "exp_id":            body.get("exp_id"),
         "voice_id":          body.get("voiceId") or ELEVENLABS_VOICE_ID,
         "elevenlabs_model":  body.get("elevenlabs_model", ELEVENLABS_MODEL),
         "deepgram_language": body.get("deepgram_language", "en"),
@@ -322,16 +326,24 @@ async def make_question_call(request: Request):
         "callback_url":      "https://your-server.com/webhook/done",   // optional
         "voiceId":           "your_elevenlabs_voice_id",               // optional
         "deepgram_language": "en"                                       // optional
+        "emp_id":            "1234567890",
+        "exp_id":            "1234567890",
     }
     """
     body      = await request.json()
     to_number = body.get("to")
     context   = body.get("context")
+    emp_id    = body.get("emp_id")
+    exp_id    = body.get("exp_id")
 
     if not to_number:
         raise HTTPException(status_code=400, detail="Missing 'to' number")
     if not context:
         raise HTTPException(status_code=400, detail="Missing 'context' (name, profession, work_experience)")
+    if not emp_id:
+        raise HTTPException(status_code=400, detail="Missing 'emp_id'")
+    if not exp_id:
+        raise HTTPException(status_code=400, detail="Missing 'exp_id'")
 
     cfg       = build_question_config(body)
     cfg_token = str(uuid.uuid4())
@@ -365,16 +377,6 @@ async def incoming_call(request: Request):
     connect.stream(url=f"{ws_base}/media-stream/{call_sid}", name="voice-agent-stream", track="inbound_track")
     response.append(connect)
     return Response(content=str(response), media_type="application/xml")
-
-
-# ── Results endpoint ───────────────────────────────────────────────────────────
-@app.get("/results/{call_sid}")
-async def get_call_result(call_sid: str):
-    """Poll this after the call ends to retrieve the summary + Q&A answers."""
-    result = call_results.get(call_sid)
-    if not result:
-        raise HTTPException(status_code=404, detail="No result yet for this call_sid. Call may still be in progress.")
-    return result
 
 
 # ─── WebSocket pipeline ───────────────────────────────────────────────────────
@@ -583,7 +585,13 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                     await send_audio_to_twilio(agent_reply)
 
                                     if result["is_done"]:
-                                        # Store results
+                                        # Build the full report — Q&A + generated summary together
+                                        qa_text = "\n\n".join(
+                                            f"Q{i+1}: {item['question']}\nA: {item['answer']}"
+                                            for i, item in enumerate(session.answers)
+                                        )
+                                        full_report = f"## Q&A Transcript\n\n{qa_text}\n\n---\n\n## Performance Report\n\n{result['summary']}"
+
                                         call_results[call_sid] = {
                                             "call_sid": call_sid,
                                             "context":  session.context,
@@ -592,12 +600,13 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                         }
                                         print(f"[{call_sid}] 📋 Summary stored", flush=True)
 
-                                        # Fire webhook if configured
-                                        cb_url = call_cfg.get("callback_url")
-                                        if cb_url:
-                                            asyncio.create_task(_post_callback(cb_url, call_results[call_sid]))
+                                        # Fire webhook → your Next.js /api/webhook/call/done
+                                        asyncio.create_task(_post_callback(WEBHOOK_URL, {
+                                            "emp_id":  call_cfg.get("emp_id"),
+                                            "exp_id":  call_cfg.get("exp_id"),
+                                            "summary": full_report,
+                                        }))
 
-                                        # Hang up after TTS finishes
                                         asyncio.create_task(end_call_after_speaking())
 
                                 # ── CHAT MODE ─────────────────────────────
@@ -622,3 +631,13 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
     await asyncio.gather(receive_from_twilio(), stream_to_deepgram())
     print(f"[{call_sid}] Pipeline finished", flush=True)
+
+# ── Results endpoint ───────────────────────────────────────────────────────────
+@app.get("/results/{call_sid}")
+async def get_call_result(call_sid: str):
+    """Poll this after the call ends to retrieve the summary + Q&A answers."""
+    result = call_results.get(call_sid)
+    if not result:
+        raise HTTPException(status_code=404, detail="No result yet for this call_sid. Call may still be in progress.")
+    return result
+
