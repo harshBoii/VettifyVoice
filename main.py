@@ -404,6 +404,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     conversation_history = []
     transcript_buffer    = []
     q1_answer_buffer     = []
+    q1_validated         = False
     stream_sid           = None
     agent_speaking       = False
     call_ending          = False      # flag: hang-up in progress, ignore new transcripts
@@ -479,9 +480,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                         first_q = await session.start()
                         candidate = ctx.get('name', 'the candidate')
                         opener  = (
-                            f"Hey there! Thanks so much for picking up. "
-                            f"My name is Annie, and I'm reaching out because {candidate} "
-                            f"listed you as a reference — which says a lot, by the way. "
+                            f"Hello  , My name is Annie, I am calling from Vettify company For a quick verification call "
+                            f"{candidate} listed you as a reference — which says a lot, by the way. "
                             f"I just have a few quick questions, shouldn't take more than a couple of minutes. "
                             f"So jumping right in — {first_q}"
                         )
@@ -585,18 +585,18 @@ async def media_stream(websocket: WebSocket, call_sid: str):
 
                                 # Q1: silently buffer chunks until ≥ 50 words
                                 # This prevents the bot interrupting mid-speech on natural pauses
-                                if session._q_index == 0 and not session._q1_validated:
+                                if session._q_index == 0 and not q1_validated:
                                     q1_answer_buffer.append(full_turn)
                                     buffered = " ".join(q1_answer_buffer)
                                     word_count = len(buffered.split())
                                     print(f"[{call_sid}] Q1 buffer: {word_count} words", flush=True)
 
                                     if word_count < 50:
-                                        continue   # stay silent — keep listening, don't interrupt
+                                        continue
 
-                                    # Buffer has enough — submit the whole thing at once
                                     answer_to_submit = buffered
                                     q1_answer_buffer.clear()
+                                    q1_validated = True
                                 else:
                                     answer_to_submit = full_turn
 
