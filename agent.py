@@ -14,7 +14,7 @@ load_dotenv()
 if "GEMINI_API_KEY" not in os.environ:
     raise ValueError("GEMINI_API_KEY environment variable not set.")
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite")
+llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview")
 
 
 class AgentDecision(BaseModel):
