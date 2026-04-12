@@ -534,9 +534,11 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                 # ── Receive transcripts from Deepgram ─────────────────────
                 async def receive_transcripts():
                     nonlocal agent_speaking
+                    nonlocal q1_validated          # ← FIX 1: declare nonlocal
+
                     async for raw_msg in dg_ws:
                         if call_ending:
-                            continue   # call is being torn down — ignore new speech
+                            continue
 
                         try:
                             msg        = json.loads(raw_msg)
@@ -550,7 +552,6 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                             is_final     = msg.get("is_final", False)
                             speech_final = msg.get("speech_final", False)
 
-                            # Human interrupted the agent
                             if agent_speaking:
                                 agent_speaking = False
                                 print(f"[{call_sid}] ⚡ Human interrupted agent", flush=True)
@@ -566,7 +567,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                 print(f"[{call_sid}] [{label}] {transcript}", flush=True)
                                 transcript_buffer.append(transcript)
 
-                            if speech_final and transcript_buffer:
+                            if speech_final and transcript_buffer:   # ← FIX 2: mode block starts here
                                 full_turn = " ".join(transcript_buffer)
                                 transcript_buffer.clear()
 
@@ -577,61 +578,58 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                 print(f"[{call_sid}] 🎤 Human: {full_turn}", flush=True)
                                 conversation_history.append({"role": "user", "content": full_turn})
 
-                                # ── QUESTION MODE ──────────────────────────
-                            if mode == "question":
-                                session = question_sessions.get(call_sid)
-                                if not session or session.is_done:
-                                    continue
-
-                                # Q1: silently buffer chunks until ≥ 50 words
-                                # This prevents the bot interrupting mid-speech on natural pauses
-                                if session._q_index == 0 and not q1_validated:
-                                    q1_answer_buffer.append(full_turn)
-                                    buffered = " ".join(q1_answer_buffer)
-                                    word_count = len(buffered.split())
-                                    print(f"[{call_sid}] Q1 buffer: {word_count} words", flush=True)
-
-                                    if word_count < 50:
+                                # ── QUESTION MODE ─────────────────────────────────────────
+                                if mode == "question":
+                                    session = question_sessions.get(call_sid)
+                                    if not session or session.is_done:
                                         continue
 
-                                    answer_to_submit = buffered
-                                    q1_answer_buffer.clear()
-                                    q1_validated = True
-                                else:
-                                    answer_to_submit = full_turn
+                                    # Buffer Q1 until ≥ 35 words to avoid mid-speech interruption
+                                    if session._q_index == 0 and not q1_validated:
+                                        q1_answer_buffer.append(full_turn)
+                                        buffered   = " ".join(q1_answer_buffer)
+                                        word_count = len(buffered.split())
+                                        print(f"[{call_sid}] Q1 buffer: {word_count} words", flush=True)
 
-                                result      = await session.submit_answer(answer_to_submit)
-                                agent_reply = result["speak"]
+                                        if word_count < 35:
+                                            continue
 
-                                conversation_history.append({"role": "assistant", "content": agent_reply})
-                                await send_audio_to_twilio(agent_reply)
+                                        answer_to_submit = buffered
+                                        q1_answer_buffer.clear()
+                                        q1_validated = True       # ← now safe, nonlocal declared above
+                                    else:
+                                        answer_to_submit = full_turn
 
-                                if result["is_done"]:
-                                    # Build the full report — Q&A + generated summary together
-                                    qa_text = "\n\n".join(
-                                        f"Q{i+1}: {item['question']}\nA: {item['answer']}"
-                                        for i, item in enumerate(session.answers)
-                                    )
-                                    full_report = f"## Q&A Transcript\n\n{qa_text}\n\n---\n\n## Performance Report\n\n{result['summary']}"
+                                    result      = await session.submit_answer(answer_to_submit)
+                                    agent_reply = result["speak"]
 
-                                    call_results[call_sid] = {
-                                        "call_sid": call_sid,
-                                        "context":  session.context,
-                                        "answers":  session.answers,
-                                        "summary":  result["summary"],
-                                    }
-                                    print(f"[{call_sid}] 📋 Summary stored", flush=True)
+                                    conversation_history.append({"role": "assistant", "content": agent_reply})
+                                    await send_audio_to_twilio(agent_reply)
 
-                                    # Fire webhook → your Next.js /api/webhook/call/done
-                                    asyncio.create_task(_post_callback(WEBHOOK_URL, {
-                                        "emp_id":  call_cfg.get("emp_id"),
-                                        "exp_id":  call_cfg.get("exp_id"),
-                                        "summary": full_report,
-                                    }))
+                                    if result["is_done"]:
+                                        qa_text = "\n\n".join(
+                                            f"Q{i+1}: {item['question']}\nA: {item['answer']}"
+                                            for i, item in enumerate(session.answers)
+                                        )
+                                        full_report = f"## Q&A Transcript\n\n{qa_text}\n\n---\n\n## Performance Report\n\n{result['summary']}"
 
-                                    asyncio.create_task(end_call_after_speaking())
+                                        payload = {
+                                            "call_sid": call_sid,
+                                            "context":  session.context,
+                                            "answers":  session.answers,
+                                            "summary":  result["summary"],
+                                        }
+                                        call_results[call_sid] = payload
+                                        print(f"[{call_sid}] 📋 Summary stored", flush=True)
 
-                                # ── CHAT MODE ─────────────────────────────
+                                        asyncio.create_task(_post_callback(WEBHOOK_URL, {
+                                            "emp_id":  call_cfg.get("emp_id"),
+                                            "exp_id":  call_cfg.get("exp_id"),
+                                            "summary": full_report,
+                                        }))
+                                        asyncio.create_task(end_call_after_speaking())
+
+                                # ── CHAT MODE ─────────────────────────────────────────────
                                 else:
                                     agent_reply = await ask_llm(
                                         conversation_history, system_prompt,
