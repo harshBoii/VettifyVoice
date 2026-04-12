@@ -100,11 +100,10 @@ Rules:
         if idx == 0 and not self._q1_validated:
             word_count = len(answer.split())
             print(f"[Session:{self._session_id}] Q1 word count: {word_count}", flush=True)
-            if word_count < 50:
+            if word_count < 10:
                 return {
                     "speak": (
                         "Thank you for that. Could you elaborate just a bit more? "
-                        "A few more sentences would really help me capture the full picture."
                     ),
                     "is_done": False,
                     "summary": None,

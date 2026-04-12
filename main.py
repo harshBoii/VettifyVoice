@@ -403,6 +403,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     audio_queue          = asyncio.Queue()
     conversation_history = []
     transcript_buffer    = []
+    q1_answer_buffer     = []
     stream_sid           = None
     agent_speaking       = False
     call_ending          = False      # flag: hang-up in progress, ignore new transcripts
@@ -476,9 +477,13 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                         question_sessions[call_sid] = session
 
                         first_q = await session.start()
+                        candidate = ctx.get('name', 'the candidate')
                         opener  = (
-                            f"Hi, I'm calling on behalf of your former colleague {ctx.get('name', 'the candidate')}. "
-                            f"I have just 5 quick questions for you. Here's the first one: {first_q}"
+                            f"Hey there! Thanks so much for picking up. "
+                            f"My name is Annie, and I'm reaching out because {candidate} "
+                            f"listed you as a reference — which says a lot, by the way. "
+                            f"I just have a few quick questions, shouldn't take more than a couple of minutes. "
+                            f"So jumping right in — {first_q}"
                         )
                         conversation_history.append({"role": "assistant", "content": opener})
                         asyncio.create_task(send_audio_to_twilio(opener))
@@ -573,16 +578,33 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                 conversation_history.append({"role": "user", "content": full_turn})
 
                                 # ── QUESTION MODE ──────────────────────────
-                                if mode == "question":
-                                    session = question_sessions.get(call_sid)
-                                    if not session or session.is_done:
-                                        continue
+                            if mode == "question":
+                                session = question_sessions.get(call_sid)
+                                if not session or session.is_done:
+                                    continue
 
-                                    result      = await session.submit_answer(full_turn)
-                                    agent_reply = result["speak"]
+                                # Q1: silently buffer chunks until ≥ 50 words
+                                # This prevents the bot interrupting mid-speech on natural pauses
+                                if session._q_index == 0 and not session._q1_validated:
+                                    q1_answer_buffer.append(full_turn)
+                                    buffered = " ".join(q1_answer_buffer)
+                                    word_count = len(buffered.split())
+                                    print(f"[{call_sid}] Q1 buffer: {word_count} words", flush=True)
 
-                                    conversation_history.append({"role": "assistant", "content": agent_reply})
-                                    await send_audio_to_twilio(agent_reply)
+                                    if word_count < 50:
+                                        continue   # stay silent — keep listening, don't interrupt
+
+                                    # Buffer has enough — submit the whole thing at once
+                                    answer_to_submit = buffered
+                                    q1_answer_buffer.clear()
+                                else:
+                                    answer_to_submit = full_turn
+
+                                result      = await session.submit_answer(answer_to_submit)
+                                agent_reply = result["speak"]
+
+                                conversation_history.append({"role": "assistant", "content": agent_reply})
+                                await send_audio_to_twilio(agent_reply)
 
                                     if result["is_done"]:
                                         # Build the full report — Q&A + generated summary together
