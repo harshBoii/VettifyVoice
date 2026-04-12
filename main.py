@@ -606,30 +606,30 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                 conversation_history.append({"role": "assistant", "content": agent_reply})
                                 await send_audio_to_twilio(agent_reply)
 
-                                    if result["is_done"]:
-                                        # Build the full report — Q&A + generated summary together
-                                        qa_text = "\n\n".join(
-                                            f"Q{i+1}: {item['question']}\nA: {item['answer']}"
-                                            for i, item in enumerate(session.answers)
-                                        )
-                                        full_report = f"## Q&A Transcript\n\n{qa_text}\n\n---\n\n## Performance Report\n\n{result['summary']}"
+                                if result["is_done"]:
+                                    # Build the full report — Q&A + generated summary together
+                                    qa_text = "\n\n".join(
+                                        f"Q{i+1}: {item['question']}\nA: {item['answer']}"
+                                        for i, item in enumerate(session.answers)
+                                    )
+                                    full_report = f"## Q&A Transcript\n\n{qa_text}\n\n---\n\n## Performance Report\n\n{result['summary']}"
 
-                                        call_results[call_sid] = {
-                                            "call_sid": call_sid,
-                                            "context":  session.context,
-                                            "answers":  session.answers,
-                                            "summary":  result["summary"],
-                                        }
-                                        print(f"[{call_sid}] 📋 Summary stored", flush=True)
+                                    call_results[call_sid] = {
+                                        "call_sid": call_sid,
+                                        "context":  session.context,
+                                        "answers":  session.answers,
+                                        "summary":  result["summary"],
+                                    }
+                                    print(f"[{call_sid}] 📋 Summary stored", flush=True)
 
-                                        # Fire webhook → your Next.js /api/webhook/call/done
-                                        asyncio.create_task(_post_callback(WEBHOOK_URL, {
-                                            "emp_id":  call_cfg.get("emp_id"),
-                                            "exp_id":  call_cfg.get("exp_id"),
-                                            "summary": full_report,
-                                        }))
+                                    # Fire webhook → your Next.js /api/webhook/call/done
+                                    asyncio.create_task(_post_callback(WEBHOOK_URL, {
+                                        "emp_id":  call_cfg.get("emp_id"),
+                                        "exp_id":  call_cfg.get("exp_id"),
+                                        "summary": full_report,
+                                    }))
 
-                                        asyncio.create_task(end_call_after_speaking())
+                                    asyncio.create_task(end_call_after_speaking())
 
                                 # ── CHAT MODE ─────────────────────────────
                                 else:
