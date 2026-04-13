@@ -9,6 +9,7 @@ import websockets
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import Response
+from starlette.websockets import WebSocketState
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.rest import Client
 from groq import AsyncGroq
@@ -408,35 +409,61 @@ async def media_stream(websocket: WebSocket, call_sid: str):
     stream_sid           = None
     agent_speaking       = False
     call_ending          = False      # flag: hang-up in progress, ignore new transcripts
+    twilio_closed        = asyncio.Event()
+    tts_lock             = asyncio.Lock()
+
+    async def safe_send_text(payload: dict) -> bool:
+        """
+        Best-effort WebSocket sender.
+        Returns False if the WS is closed / cannot be written to.
+        """
+        if twilio_closed.is_set():
+            return False
+        try:
+            # Starlette/FastAPI WebSocket state checks
+            if websocket.application_state != WebSocketState.CONNECTED:
+                return False
+            await websocket.send_text(json.dumps(payload))
+            return True
+        except Exception:
+            return False
 
     # ── TTS sender ────────────────────────────────────────────────────────────
     async def send_audio_to_twilio(text: str):
         nonlocal agent_speaking
-        agent_speaking = True
-        print(f"[{call_sid}] 🔊 Speaking: {text[:100]}", flush=True)
-        chunk_count = 0
-        async for mulaw_b64 in text_to_mulaw_chunks(text, el_model, voice_id):
-            if not agent_speaking:
-                print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
-                break
-            try:
-                await websocket.send_text(json.dumps({
+        if twilio_closed.is_set():
+            return
+        async with tts_lock:
+            if twilio_closed.is_set():
+                return
+            agent_speaking = True
+            print(f"[{call_sid}] 🔊 Speaking: {text[:100]}", flush=True)
+            chunk_count = 0
+            async for mulaw_b64 in text_to_mulaw_chunks(text, el_model, voice_id):
+                if twilio_closed.is_set():
+                    break
+                if not agent_speaking:
+                    print(f"[{call_sid}] ⚡ Interrupted — stopping TTS", flush=True)
+                    break
+                if not stream_sid:
+                    await asyncio.sleep(0.02)
+                    continue
+                ok = await safe_send_text({
                     "event":     "media",
                     "streamSid": stream_sid,
                     "media":     {"payload": mulaw_b64},
-                }))
+                })
+                if not ok:
+                    break
                 chunk_count += 1
-            except Exception as e:
-                print(f"[{call_sid}] Send error: {e}", flush=True)
-                break
-        try:
-            await websocket.send_text(json.dumps({
-                "event": "mark", "streamSid": stream_sid, "mark": {"name": "agent_done"}
-            }))
-        except Exception:
-            pass
-        agent_speaking = False
-        print(f"[{call_sid}] ✅ Sent {chunk_count} chunks", flush=True)
+
+            if stream_sid:
+                await safe_send_text({
+                    "event": "mark", "streamSid": stream_sid, "mark": {"name": "agent_done"}
+                })
+
+            agent_speaking = False
+            print(f"[{call_sid}] ✅ Sent {chunk_count} chunks", flush=True)
 
     # ── Hang-up helper ────────────────────────────────────────────────────────
     async def end_call_after_speaking():
@@ -508,6 +535,7 @@ async def media_stream(websocket: WebSocket, call_sid: str):
         except Exception as e:
             print(f"[{call_sid}] Twilio receiver error: {e}", flush=True)
         finally:
+            twilio_closed.set()
             await audio_queue.put(None)
 
     # ── Deepgram pipeline ─────────────────────────────────────────────────────
@@ -555,12 +583,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                             if agent_speaking:
                                 agent_speaking = False
                                 print(f"[{call_sid}] ⚡ Human interrupted agent", flush=True)
-                                try:
-                                    await websocket.send_text(json.dumps({
-                                        "event": "clear", "streamSid": stream_sid
-                                    }))
-                                except Exception:
-                                    pass
+                                if stream_sid:
+                                    await safe_send_text({"event": "clear", "streamSid": stream_sid})
 
                             if is_final:
                                 label = "FINAL ✅" if speech_final else "FINAL"
@@ -604,7 +628,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                     agent_reply = result["speak"]
 
                                     conversation_history.append({"role": "assistant", "content": agent_reply})
-                                    await send_audio_to_twilio(agent_reply)
+                                    # Don't block transcript receiving / WS keepalives on long TTS streaming.
+                                    asyncio.create_task(send_audio_to_twilio(agent_reply))
 
                                     if result["is_done"]:
                                         qa_text = "\n\n".join(
@@ -637,7 +662,8 @@ async def media_stream(websocket: WebSocket, call_sid: str):
                                     )
                                     conversation_history.append({"role": "assistant", "content": agent_reply})
                                     print(f"[{call_sid}] 🤖 [{llm_provider}] Agent: {agent_reply}", flush=True)
-                                    await send_audio_to_twilio(agent_reply)
+                                    # Don't block transcript receiving / WS keepalives on long TTS streaming.
+                                    asyncio.create_task(send_audio_to_twilio(agent_reply))
 
                         except Exception as e:
                             print(f"[{call_sid}] Transcript error: {e}", flush=True)
